@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { RefreshCw, Play, Square, ExternalLink, QrCode, PlusCircle, Copy, Check, Info } from 'lucide-react';
-import { AttendanceSession, AttendanceRecord, SheetRowData } from '../types/attendance';
+import { RefreshCw, Play, Square, ExternalLink, QrCode, PlusCircle, Copy, Check, Info, Calendar, Plus, ChevronDown, Zap, Radio, Activity } from 'lucide-react';
+import { AttendanceSession, AttendanceRecord, SheetRowData, SheetTabInfo } from '../types/attendance';
 
 interface AttendanceSyncCardProps {
   session: AttendanceSession;
@@ -11,11 +11,19 @@ interface AttendanceSyncCardProps {
   onToggleAutoSync: () => void;
   onManualSync: () => void;
   onOpenQuickMark: () => void;
+  activeTabName?: string;
+  availableTabs?: SheetTabInfo[];
+  onSelectTab?: (tabName: string) => void;
+  onOpenCreateTab?: () => void;
+  transmissionSpeed?: number;
+  onChangeTransmissionSpeed?: (seconds: number) => void;
+  nextTransmitCountdown?: number;
   lastSyncDetails?: {
     time: string;
     formResponseCount: number;
     newRowsAdded: number;
     alreadyExisting: number;
+    targetTab?: string;
   } | null;
 }
 
@@ -28,6 +36,13 @@ export const AttendanceSyncCard: React.FC<AttendanceSyncCardProps> = ({
   onToggleAutoSync,
   onManualSync,
   onOpenQuickMark,
+  activeTabName = 'Attendance Records',
+  availableTabs = [],
+  onSelectTab,
+  onOpenCreateTab,
+  transmissionSpeed = 3,
+  onChangeTransmissionSpeed,
+  nextTransmitCountdown = 3,
   lastSyncDetails
 }) => {
   const [copiedLink, setCopiedLink] = useState(false);
@@ -113,6 +128,74 @@ export const AttendanceSyncCard: React.FC<AttendanceSyncCardProps> = ({
         </div>
       </div>
 
+      {/* Real-time Data Transmission Pulse Monitor Strip */}
+      <div className="px-4 py-2.5 bg-gradient-to-r from-emerald-950 via-slate-900 to-slate-950 text-white border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-1.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-2.5 py-0.5 rounded-full font-mono text-[11px] font-bold">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping inline-block" />
+            <Activity className="w-3.5 h-3.5 text-emerald-400" />
+            <span>REAL-TIME TRANSMIT LIVE</span>
+          </div>
+
+          <span className="text-slate-300 text-[11px] hidden sm:inline">
+            Transmitting Google Form submissions ➔ Google Sheet tab <strong className="text-emerald-300 font-mono">[{activeTabName}]</strong>
+          </span>
+        </div>
+
+        <div className="flex items-center gap-3">
+          {/* Transmission Speed Selector */}
+          {onChangeTransmissionSpeed && (
+            <div className="flex items-center gap-1 text-[11px] text-slate-300">
+              <span className="hidden md:inline">Speed:</span>
+              <div className="flex bg-slate-800/80 rounded-lg p-0.5 border border-slate-700">
+                <button
+                  type="button"
+                  onClick={() => onChangeTransmissionSpeed(3)}
+                  className={`px-2 py-0.5 rounded text-[11px] font-bold transition cursor-pointer ${
+                    transmissionSpeed === 3
+                      ? 'bg-emerald-600 text-white shadow-2xs'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="Transmit every 3 seconds"
+                >
+                  ⚡ 3s Turbo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onChangeTransmissionSpeed(5)}
+                  className={`px-2 py-0.5 rounded text-[11px] font-bold transition cursor-pointer ${
+                    transmissionSpeed === 5
+                      ? 'bg-emerald-600 text-white shadow-2xs'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="Transmit every 5 seconds"
+                >
+                  5s Fast
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onChangeTransmissionSpeed(10)}
+                  className={`px-2 py-0.5 rounded text-[11px] font-bold transition cursor-pointer ${
+                    transmissionSpeed === 10
+                      ? 'bg-emerald-600 text-white shadow-2xs'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="Transmit every 10 seconds"
+                >
+                  10s
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Countdown indicator */}
+          <div className="flex items-center gap-1.5 text-[11px] font-mono text-emerald-400 bg-slate-800 px-2 py-0.5 rounded-lg border border-slate-700">
+            <Radio className="w-3 h-3 text-emerald-400 animate-pulse" />
+            <span>Cycle: {isSyncing ? 'Transmitting...' : `${nextTransmitCountdown}s`}</span>
+          </div>
+        </div>
+      </div>
+
       {/* QR Code Projector Modal/Panel */}
       {showQr && (
         <div className="bg-slate-50 border-b border-slate-200 p-6 flex flex-col items-center justify-center text-center animate-in fade-in">
@@ -140,6 +223,53 @@ export const AttendanceSyncCard: React.FC<AttendanceSyncCardProps> = ({
         </div>
       )}
 
+      {/* Date Sheet Tab Target Bar */}
+      <div className="px-4 py-3 bg-emerald-50/50 border-b border-emerald-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1.5 text-xs text-slate-600 font-medium">
+            <Calendar className="w-4 h-4 text-emerald-600" />
+            <span>Target Google Sheet Tab:</span>
+          </div>
+
+          {availableTabs.length > 0 ? (
+            <div className="relative">
+              <select
+                value={activeTabName}
+                onChange={(e) => onSelectTab && onSelectTab(e.target.value)}
+                className="text-xs font-bold text-emerald-900 bg-white border border-emerald-300 rounded-lg pl-3 pr-8 py-1.5 shadow-2xs outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer appearance-none"
+              >
+                {availableTabs.map((t) => (
+                  <option key={t.sheetId} value={t.title}>
+                    {t.title}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="w-3.5 h-3.5 text-emerald-700 absolute right-2.5 top-2 pointer-events-none" />
+            </div>
+          ) : (
+            <span className="px-2.5 py-1 bg-white border border-emerald-300 text-emerald-900 font-bold text-xs rounded-lg shadow-2xs font-mono">
+              {activeTabName}
+            </span>
+          )}
+
+          <span className="text-[11px] text-slate-500 hidden md:inline">
+            (All real-time submissions & manual entries transmit directly to this tab)
+          </span>
+        </div>
+
+        {/* Next Day Tab Quick Creation Button */}
+        {onOpenCreateTab && (
+          <button
+            onClick={onOpenCreateTab}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 transition shadow-2xs cursor-pointer self-start sm:self-auto"
+            title="Create a new tab in this Google Sheet for next day or specific date"
+          >
+            <Plus className="w-3.5 h-3.5 text-emerald-700" />
+            <span>+ Create Next Day Tab</span>
+          </button>
+        )}
+      </div>
+
       {/* Sync Status & Stats Toolbar */}
       <div className="p-4 bg-slate-50/70 border-b border-slate-200/70 flex flex-col md:flex-row items-center justify-between gap-4">
         {/* Sync Controls */}
@@ -148,9 +278,10 @@ export const AttendanceSyncCard: React.FC<AttendanceSyncCardProps> = ({
             onClick={onManualSync}
             disabled={isSyncing}
             className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white transition shadow-xs disabled:opacity-50 cursor-pointer"
+            title={`Force instant transmission to tab: ${activeTabName}`}
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-            <span>{isSyncing ? 'Syncing...' : 'Sync Form ➔ Sheet'}</span>
+            <Zap className={`w-3.5 h-3.5 ${isSyncing ? 'animate-bounce text-amber-300' : 'text-amber-300'}`} />
+            <span>{isSyncing ? 'Transmitting Data...' : `Transmit Now ➔ ${activeTabName}`}</span>
           </button>
 
           <button
@@ -164,13 +295,13 @@ export const AttendanceSyncCard: React.FC<AttendanceSyncCardProps> = ({
             {autoSyncActive ? (
               <>
                 <Square className="w-3 h-3 text-emerald-600 fill-emerald-600" />
-                <span>Auto-Sync ON (Every 15s)</span>
+                <span>Real-Time Stream Active</span>
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping ml-1" />
               </>
             ) : (
               <>
                 <Play className="w-3 h-3 text-slate-500" />
-                <span>Enable Live Auto-Sync</span>
+                <span>Resume Real-Time Stream</span>
               </>
             )}
           </button>
@@ -184,7 +315,7 @@ export const AttendanceSyncCard: React.FC<AttendanceSyncCardProps> = ({
           </button>
         </div>
 
-        {/* Live Counters */}
+        {/* Live Counters for Active Tab */}
         <div className="flex flex-wrap items-center gap-3 text-xs">
           <div className="flex items-center gap-1.5 bg-emerald-50 text-emerald-800 px-2.5 py-1 rounded-lg border border-emerald-200">
             <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
@@ -211,7 +342,7 @@ export const AttendanceSyncCard: React.FC<AttendanceSyncCardProps> = ({
           </div>
 
           <div className="pl-2 border-l border-slate-200 text-slate-700 font-semibold">
-            In Sheet: <span className="text-emerald-700">{totalMarked}</span>
+            In {activeTabName}: <span className="text-emerald-700">{totalMarked}</span>
           </div>
         </div>
       </div>
@@ -224,12 +355,12 @@ export const AttendanceSyncCard: React.FC<AttendanceSyncCardProps> = ({
             <span>
               Google Form Responses: <strong className="text-slate-800">{lastSyncDetails.formResponseCount}</strong>
               {' | '}
-              Newly Added to Sheet: <strong className="text-emerald-700">{lastSyncDetails.newRowsAdded}</strong>
+              Newly Transmitted to <span className="font-mono font-bold text-emerald-800">{lastSyncDetails.targetTab || activeTabName}</span>: <strong className="text-emerald-700">{lastSyncDetails.newRowsAdded}</strong>
               {' | '}
-              Already in Sheet: <strong className="text-slate-700">{lastSyncDetails.alreadyExisting}</strong>
+              Already in Tab: <strong className="text-slate-700">{lastSyncDetails.alreadyExisting}</strong>
             </span>
           </div>
-          <span className="text-slate-400 font-mono">Last Checked: {lastSyncDetails.time}</span>
+          <span className="text-slate-400 font-mono">Last Transmit: {lastSyncDetails.time}</span>
         </div>
       )}
     </div>

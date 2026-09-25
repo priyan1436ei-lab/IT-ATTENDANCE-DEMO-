@@ -1,6 +1,6 @@
 // Google Workspace API Service for Forms, Sheets, and Drive
 import { getAccessToken, setAccessToken, googleSignIn, logoutUser, auth } from './firebaseAuth';
-import { AttendanceRecord, SheetRowData } from '../types/attendance';
+import { AttendanceRecord, SheetRowData, SheetTabInfo } from '../types/attendance';
 
 export interface SyncDiagnosis {
   formId: string;
@@ -10,6 +10,12 @@ export interface SyncDiagnosis {
   newRowsAdded: number;
   alreadyInSheetCount: number;
   errors: string[];
+}
+
+declare global {
+  interface Window {
+    google?: any;
+  }
 }
 
 class WorkspaceService {
@@ -370,15 +376,19 @@ class WorkspaceService {
   }
 
   /**
-   * 4. Fetch Form Responses
+   * 4. Fetch Form Responses with real-time zero-cache headers
    */
   public async getFormResponses(formId: string): Promise<any[]> {
     const token = getAccessToken();
     if (!token) throw new Error('Not authenticated');
 
     const cleanId = this.extractIdFromUrl(formId);
-    const res = await fetch(`https://forms.googleapis.com/v1/forms/${cleanId}/responses`, {
-      headers: { Authorization: `Bearer ${token}` }
+    const res = await fetch(`https://forms.googleapis.com/v1/forms/${cleanId}/responses?_ts=${Date.now()}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        Pragma: 'no-cache'
+      }
     });
 
     if (!res.ok) {
@@ -498,8 +508,205 @@ class WorkspaceService {
   }
 
   /**
+   * Helper to safely format range with quoted sheet name
+   */
+  public formatRange(sheetName: string, range: string): string {
+    const safeName = sheetName.replace(/'/g, "''");
+    return `'${safeName}'!${range}`;
+  }
+
+  /**
+   * Fetch all sheet tabs in the spreadsheet
+   */
+  public async getSheetTabs(spreadsheetId: string): Promise<SheetTabInfo[]> {
+    const token = getAccessToken();
+    if (!token) throw new Error('Not authenticated');
+
+    const cleanId = this.extractIdFromUrl(spreadsheetId);
+    const res = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}?fields=sheets.properties(sheetId,title,index)`,
+      {
+        headers: { Authorization: `Bearer ${token}` }
+      }
+    );
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || 'Failed to fetch spreadsheet tabs');
+    }
+
+    const data = await res.json();
+    return (data.sheets || []).map((s: any) => ({
+      sheetId: s.properties?.sheetId ?? 0,
+      title: s.properties?.title || 'Sheet1',
+      index: s.properties?.index || 0
+    }));
+  }
+
+  /**
+   * Create a new Date tab in the spreadsheet (or duplicate existing tab for the next day)
+   * User requirement:
+   * "அடுத்த டே-க்கு ஒரு புது ஷீட் அந்த ஷீட்ல இருந்தே இன்னொரு டேப்ல அதே ஷீட்ட கிரியேட் பண்ணிக்கிட்டு அதுவே இன்னொரு ஷீட்டுக்கு அப்டேட் ஆயிடணும் டேட்டுக்கு."
+   */
+  public async createDateTab(
+    spreadsheetId: string,
+    options: {
+      newTabName: string;
+      copyFromSheetId?: number;
+      clearCopiedRows?: boolean;
+    }
+  ): Promise<SheetTabInfo> {
+    const token = getAccessToken();
+    if (!token) throw new Error('Not authenticated');
+
+    const cleanId = this.extractIdFromUrl(spreadsheetId);
+    const existingTabs = await this.getSheetTabs(cleanId);
+    const existing = existingTabs.find((t) => t.title.toLowerCase() === options.newTabName.trim().toLowerCase());
+    if (existing) {
+      return existing; // already exists, return existing
+    }
+
+    let createdSheetId: number | undefined;
+    const sourceSheetId =
+      options.copyFromSheetId !== undefined
+        ? options.copyFromSheetId
+        : (existingTabs.length > 0 ? existingTabs[existingTabs.length - 1].sheetId : undefined);
+
+    // Option 1: Duplicate from existing tab to keep exact headers, column styling, colors, and layout
+    if (sourceSheetId !== undefined) {
+      try {
+        const dupRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${cleanId}:batchUpdate`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            requests: [
+              {
+                duplicateSheet: {
+                  sourceSheetId: sourceSheetId,
+                  insertSheetIndex: existingTabs.length,
+                  newSheetName: options.newTabName
+                }
+              }
+            ]
+          })
+        });
+
+        if (dupRes.ok) {
+          const dupData = await dupRes.json();
+          createdSheetId = dupData.replies?.[0]?.duplicateSheet?.properties?.sheetId;
+
+          // Clear student data rows below header (A2:Z) so the new day has a clean attendance register
+          if (options.clearCopiedRows !== false) {
+            const clearRange = this.formatRange(options.newTabName, 'A2:Z');
+            await fetch(
+              `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(clearRange)}:clear`,
+              {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}` }
+              }
+            ).catch((e) => console.warn('Could not clear copied data rows:', e));
+          }
+        }
+      } catch (e) {
+        console.warn('Duplicate sheet failed, falling back to addSheet:', e);
+      }
+    }
+
+    // Option 2: Fallback or fresh creation via addSheet
+    if (createdSheetId === undefined) {
+      const addRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${cleanId}:batchUpdate`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          requests: [
+            {
+              addSheet: {
+                properties: {
+                  title: options.newTabName,
+                  gridProperties: {
+                    rowCount: 100,
+                    columnCount: 10,
+                    frozenRowCount: 1
+                  }
+                }
+              }
+            }
+          ]
+        })
+      });
+
+      if (!addRes.ok) {
+        const err = await addRes.json().catch(() => ({}));
+        throw new Error(err.error?.message || `Failed to create tab '${options.newTabName}' in Google Sheet`);
+      }
+
+      const addData = await addRes.json();
+      createdSheetId = addData.replies?.[0]?.addSheet?.properties?.sheetId;
+
+      // Write Header row
+      const headerRange = this.formatRange(options.newTabName, 'A1:G1');
+      await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(headerRange)}?valueInputOption=USER_ENTERED`,
+        {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            values: [['Timestamp', 'Roll Number', 'Student Name', 'Status', 'Session / Class', 'Notes / Remarks', 'Form Response ID']]
+          })
+        }
+      );
+    }
+
+    return {
+      sheetId: createdSheetId || 0,
+      title: options.newTabName,
+      index: existingTabs.length
+    };
+  }
+
+  /**
+   * Automatically ensure today's date tab exists in the Google Spreadsheet.
+   * If today's tab does not exist, it automatically duplicates from the previous tab!
+   * User requirement:
+   * "ஆட்டோமேட்டிக்காவே அதுவே வந்து கிரியேட் பண்ணிக்கணும். யாரும் கிரியேட் பண்ணக்கூடாது. ஒரு ஒரு டேக்கும் அந்த ஷீட்லயே அதுவே டூப்ளிகேட் பண்ணிக்கணும்."
+   */
+  public async ensureTodayDateTab(spreadsheetId: string): Promise<{ tab: SheetTabInfo; wasCreated: boolean }> {
+    const token = getAccessToken();
+    if (!token) throw new Error('Not authenticated');
+
+    const cleanId = this.extractIdFromUrl(spreadsheetId);
+    const existingTabs = await this.getSheetTabs(cleanId);
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    // Check if a tab matching today's date already exists
+    const existing = existingTabs.find((t) => t.title.toLowerCase() === todayStr.toLowerCase());
+    if (existing) {
+      return { tab: existing, wasCreated: false };
+    }
+
+    // Tab for today does not exist yet! Automatically duplicate from previous tab
+    const sourceSheetId = existingTabs[existingTabs.length - 1]?.sheetId ?? existingTabs[0]?.sheetId;
+    const newTab = await this.createDateTab(cleanId, {
+      newTabName: todayStr,
+      copyFromSheetId: sourceSheetId,
+      clearCopiedRows: true
+    });
+
+    return { tab: newTab, wasCreated: true };
+  }
+
+  /**
    * 6. Read existing rows from Google Sheet
-   * Dynamically checks first sheet name if "Attendance Records" doesn't exist
+   * Dynamically checks first sheet name if target sheet doesn't exist
    */
   public async getSheetRecords(spreadsheetId: string, sheetName: string = 'Attendance Records'): Promise<SheetRowData[]> {
     const token = getAccessToken();
@@ -507,28 +714,40 @@ class WorkspaceService {
 
     const cleanId = this.extractIdFromUrl(spreadsheetId);
 
-    // Try reading target sheet name
-    let range = `${sheetName}!A2:G`;
+    // Try reading target sheet name with quoted range
+    let range = this.formatRange(sheetName, 'A2:G');
     let res = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(range)}`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(range)}?_ts=${Date.now()}`,
       {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          Pragma: 'no-cache'
+        }
       }
     );
 
     // If target sheetName failed, inspect spreadsheet to find the real sheet tab title
     if (!res.ok) {
-      const metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${cleanId}?fields=sheets.properties.title`, {
-        headers: { Authorization: `Bearer ${token}` }
+      const metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${cleanId}?fields=sheets.properties.title&_ts=${Date.now()}`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          Pragma: 'no-cache'
+        }
       });
       if (metaRes.ok) {
         const meta = await metaRes.json();
         const firstSheet = meta.sheets?.[0]?.properties?.title || 'Sheet1';
-        range = `${firstSheet}!A2:G`;
+        range = this.formatRange(firstSheet, 'A2:G');
         res = await fetch(
-          `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(range)}`,
+          `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(range)}?_ts=${Date.now()}`,
           {
-            headers: { Authorization: `Bearer ${token}` }
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Cache-Control': 'no-cache, no-store, must-revalidate',
+              Pragma: 'no-cache'
+            }
           }
         );
       }
@@ -585,10 +804,11 @@ class WorkspaceService {
       }
     });
 
-    // Also read raw range A:G to inspect Column G (response ID)
+    // Also read raw range Column G (response ID)
     try {
+      const gRange = this.formatRange(sheetName, 'G2:G');
       const fullRangeRes = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(sheetName + '!G2:G')}`,
+        `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(gRange)}`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (fullRangeRes.ok) {
@@ -637,15 +857,16 @@ class WorkspaceService {
 
     // Ensure header row exists if sheet is empty
     if (existing.length === 0) {
+      const headerRange = this.formatRange(sheetName, 'A1:G1');
       const checkHeaderRes = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(sheetName + '!A1:G1')}`,
+        `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(headerRange)}`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      const hData = await checkHeaderRes.json();
+      const hData = await checkHeaderRes.json().catch(() => ({}));
       if (!hData.values || hData.values.length === 0) {
         // Write header
         await fetch(
-          `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(sheetName + '!A1:G1')}?valueInputOption=USER_ENTERED`,
+          `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(headerRange)}?valueInputOption=USER_ENTERED`,
           {
             method: 'PUT',
             headers: {
@@ -661,7 +882,8 @@ class WorkspaceService {
     }
 
     // Append rows
-    const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(sheetName + '!A:G')}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+    const appendRange = this.formatRange(sheetName, 'A:G');
+    const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(appendRange)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
     const res = await fetch(appendUrl, {
       method: 'POST',
       headers: {

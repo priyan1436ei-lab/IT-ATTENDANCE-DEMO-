@@ -6,6 +6,7 @@ interface QuickMarkModalProps {
   isOpen: boolean;
   onClose: () => void;
   roster: StudentProfile[];
+  activeTabName?: string;
   onMarkAttendance: (student: { rollNumber: string; name: string; status: 'Present' | 'Absent' | 'Late' | 'Excused'; notes: string }) => Promise<void>;
 }
 
@@ -13,6 +14,7 @@ export const QuickMarkModal: React.FC<QuickMarkModalProps> = ({
   isOpen,
   onClose,
   roster,
+  activeTabName = 'Attendance Records',
   onMarkAttendance
 }) => {
   const [selectedStudent, setSelectedStudent] = useState<StudentProfile | null>(null);
@@ -63,8 +65,13 @@ export const QuickMarkModal: React.FC<QuickMarkModalProps> = ({
               <UserCheck className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-sm font-bold text-slate-800">Quick Manual Attendance Mark</h3>
-              <p className="text-xs text-slate-500">Directly append or adjust student status in Google Sheet</p>
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-bold text-slate-800">Quick Manual Attendance Mark</h3>
+                <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-mono font-bold rounded">
+                  Tab: {activeTabName}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500">Directly append or adjust student status in Google Sheet tab '{activeTabName}'</p>
             </div>
           </div>
           <button

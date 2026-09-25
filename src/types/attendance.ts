@@ -28,6 +28,12 @@ export interface AttendanceRecord {
   syncedToSheet?: boolean;
 }
 
+export interface SheetTabInfo {
+  sheetId: number;
+  title: string;
+  index: number;
+}
+
 export interface AttendanceSession {
   id: string;
   title: string;
@@ -40,6 +46,8 @@ export interface AttendanceSession {
   spreadsheetId: string;
   spreadsheetUrl: string;
   sheetName?: string;
+  activeTab?: string;
+  availableTabs?: SheetTabInfo[];
   totalEnrolled?: number;
   createdAt: string;
   lastSyncAt?: string;
