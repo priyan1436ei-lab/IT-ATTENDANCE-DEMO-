@@ -7,6 +7,15 @@ export interface GoogleTokenResponse {
   error_description?: string;
 }
 
+export type UserRole = 'admin' | 'student';
+
+export interface AppUserSession {
+  role: UserRole;
+  identifier: string; // admin username or student rollNumber
+  name: string;
+  department?: string;
+}
+
 export interface AttendanceRecord {
   responseId: string;
   timestamp: string; // ISO string
@@ -25,11 +34,11 @@ export interface AttendanceSession {
   subject: string;
   department: string;
   date: string; // YYYY-MM-DD
-  formId?: string;
+  formId: string;
   formResponderUri?: string;
   formEditUri?: string;
-  spreadsheetId?: string;
-  spreadsheetUrl?: string;
+  spreadsheetId: string;
+  spreadsheetUrl: string;
   sheetName?: string;
   totalEnrolled?: number;
   createdAt: string;
@@ -39,6 +48,7 @@ export interface AttendanceSession {
 export interface StudentProfile {
   rollNumber: string;
   name: string;
+  password?: string;
   email?: string;
   department?: string;
 }

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Sparkles, FileText, Table, Check, ExternalLink, Calendar, BookOpen, Layers } from 'lucide-react';
+import { Table, Check, ExternalLink, Calendar, BookOpen, Layers, Link2, FileText } from 'lucide-react';
 import { workspaceService } from '../services/workspace';
 import { AttendanceSession } from '../types/attendance';
 
@@ -18,7 +18,12 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
   const [department, setDepartment] = useState('B.Tech / B.E - IT');
   const [date, setDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [sessionTitle, setSessionTitle] = useState('');
-  const [step, setStep] = useState<'details' | 'creating' | 'done'>('details');
+
+  // Existing links
+  const [existingFormUrl, setExistingFormUrl] = useState('');
+  const [existingSheetUrl, setExistingSheetUrl] = useState('');
+
+  const [step, setStep] = useState<'details' | 'connecting' | 'done'>('details');
   const [progressMsg, setProgressMsg] = useState('');
   const [createdSession, setCreatedSession] = useState<AttendanceSession | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -29,45 +34,57 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
     e.preventDefault();
     if (!subject) return;
 
-    setStep('creating');
+    const formId = workspaceService.extractIdFromUrl(existingFormUrl);
+    const sheetId = workspaceService.extractIdFromUrl(existingSheetUrl);
+
+    if (!formId) {
+      setError('Please enter a valid Google Form URL or Form ID.');
+      return;
+    }
+
+    if (!sheetId) {
+      setError('Please enter a valid Google Sheet URL or Sheet ID.');
+      return;
+    }
+
+    setStep('connecting');
     setError(null);
 
     const title = sessionTitle.trim() || `${subject} - Attendance`;
 
     try {
-      // Step 1: Create Google Form
-      setProgressMsg('1/3 Creating Google Form with Roll No & Status questions...');
-      const form = await workspaceService.createAttendanceForm(title, subject, date);
+      setProgressMsg('1/2 Verifying Google Form permissions and questions...');
+      await workspaceService.getFormDetails(formId);
 
-      // Step 2: Create Google Sheet Register
-      setProgressMsg('2/3 Setting up Google Spreadsheet register & summary tabs...');
-      const sheetTitle = `${subject} Attendance Register (${date})`;
-      const sheet = await workspaceService.createAttendanceSpreadsheet(sheetTitle);
+      setProgressMsg('2/2 Verifying Google Sheet register tabs...');
+      await workspaceService.getSheetRecords(sheetId);
 
-      // Step 3: Bundle into attendance session
-      setProgressMsg('3/3 Linking Form and Sheet real-time sync...');
-      const newSession: AttendanceSession = {
+      const linkedSession: AttendanceSession = {
         id: 'sess_' + Date.now(),
         title,
         subject,
         department,
         date,
-        formId: form.formId,
-        formResponderUri: form.responderUri,
-        formEditUri: form.editUri,
-        spreadsheetId: sheet.id,
-        spreadsheetUrl: sheet.spreadsheetUrl,
+        formId,
+        formResponderUri: existingFormUrl.includes('viewform')
+          ? existingFormUrl
+          : `https://docs.google.com/forms/d/${formId}/viewform`,
+        formEditUri: `https://docs.google.com/forms/d/${formId}/edit`,
+        spreadsheetId: sheetId,
+        spreadsheetUrl: existingSheetUrl.startsWith('http')
+          ? existingSheetUrl
+          : `https://docs.google.com/spreadsheets/d/${sheetId}/edit`,
         sheetName: 'Attendance Records',
         totalEnrolled: 60,
         createdAt: new Date().toISOString()
       };
 
-      setCreatedSession(newSession);
-      onCreated(newSession);
+      setCreatedSession(linkedSession);
+      onCreated(linkedSession);
       setStep('done');
     } catch (err: any) {
       console.error(err);
-      setError(err?.message || 'Failed to setup Google Form and Sheet');
+      setError(err?.message || 'Could not connect Google Form or Google Sheet. Please verify the URLs and access permissions.');
       setStep('details');
     }
   };
@@ -75,13 +92,13 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
       <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden border border-slate-100 animate-in fade-in zoom-in-95 duration-200">
-        <div className="p-6 bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 text-white">
+        <div className="p-6 bg-gradient-to-r from-emerald-600 via-teal-600 to-slate-900 text-white">
           <div className="flex items-center gap-2 mb-1">
-            <Sparkles className="w-5 h-5 text-amber-300" />
-            <h2 className="text-xl font-bold">New Class Attendance Session</h2>
+            <Link2 className="w-5 h-5 text-emerald-300" />
+            <h2 className="text-xl font-bold">Connect Google Form & Google Sheet</h2>
           </div>
           <p className="text-emerald-100 text-xs">
-            Creates a dedicated Google Form for students & a Google Sheet attendance register synced in real-time.
+            Link your existing Google Form and Google Sheet spreadsheet to establish automatic real-time sync.
           </p>
         </div>
 
@@ -95,14 +112,14 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
 
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Subject / Course Name *
+                Course / Subject Name *
               </label>
               <div className="relative">
                 <BookOpen className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
                 <input
                   type="text"
                   required
-                  placeholder="e.g. Data Structures & Algorithms, Python Lab"
+                  placeholder="e.g. Data Structures, Python Lab, Operating Systems"
                   value={subject}
                   onChange={(e) => setSubject(e.target.value)}
                   className="w-full pl-9 pr-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none transition"
@@ -113,7 +130,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Department / Class
+                  Class / Department
                 </label>
                 <div className="relative">
                   <Layers className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
@@ -144,17 +161,43 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
               </div>
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Session Title (Optional)
-              </label>
-              <input
-                type="text"
-                placeholder={subject ? `${subject} - Period 1 (${date})` : 'Auto-generated title'}
-                value={sessionTitle}
-                onChange={(e) => setSessionTitle(e.target.value)}
-                className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none transition"
-              />
+            {/* Links Section */}
+            <div className="space-y-3 p-4 bg-slate-50 border border-slate-200 rounded-xl">
+              <div>
+                <label className="block text-xs font-bold text-slate-800 mb-1 flex items-center gap-1.5">
+                  <FileText className="w-3.5 h-3.5 text-purple-600" />
+                  Your Google Form URL or Form ID *
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="https://docs.google.com/forms/d/..."
+                  value={existingFormUrl}
+                  onChange={(e) => setExistingFormUrl(e.target.value)}
+                  className="w-full px-3 py-2 text-xs font-mono border border-slate-200 rounded-lg bg-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                />
+                <p className="text-[11px] text-slate-500 mt-1">
+                  The Google Form where students submit their attendance.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-800 mb-1 flex items-center gap-1.5">
+                  <Table className="w-3.5 h-3.5 text-emerald-600" />
+                  Your Google Sheet URL or Sheet ID *
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="https://docs.google.com/spreadsheets/d/..."
+                  value={existingSheetUrl}
+                  onChange={(e) => setExistingSheetUrl(e.target.value)}
+                  className="w-full px-3 py-2 text-xs font-mono border border-slate-200 rounded-lg bg-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                />
+                <p className="text-[11px] text-slate-500 mt-1">
+                  The destination Google Sheet where student records will be added.
+                </p>
+              </div>
             </div>
 
             <div className="pt-2 flex items-center justify-end gap-3 border-t border-slate-100">
@@ -169,18 +212,18 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
                 type="submit"
                 className="px-5 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-sm hover:shadow transition cursor-pointer flex items-center gap-1.5"
               >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>Create Form & Sheet</span>
+                <Link2 className="w-3.5 h-3.5" />
+                <span>Connect & Link</span>
               </button>
             </div>
           </form>
         )}
 
-        {step === 'creating' && (
+        {step === 'connecting' && (
           <div className="p-8 text-center space-y-4">
             <div className="w-12 h-12 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
             <div>
-              <h3 className="text-sm font-bold text-slate-800 mb-1">Generating Workspace Resources...</h3>
+              <h3 className="text-sm font-bold text-slate-800 mb-1">Connecting Form & Sheet...</h3>
               <p className="text-xs text-slate-500 font-mono">{progressMsg}</p>
             </div>
           </div>
@@ -192,9 +235,9 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
               <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-2">
                 <Check className="w-6 h-6" />
               </div>
-              <h3 className="text-base font-bold text-slate-900">Attendance Session Ready!</h3>
+              <h3 className="text-base font-bold text-slate-900">Form & Sheet Linked Successfully!</h3>
               <p className="text-xs text-slate-500 mt-1">
-                Your Google Form and Google Sheet register are created and linked.
+                Your Google Form and Google Sheet are connected. New responses will sync directly into the spreadsheet.
               </p>
             </div>
 
@@ -202,7 +245,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
               <div className="flex items-center justify-between text-xs">
                 <span className="font-semibold text-slate-700 flex items-center gap-1.5">
                   <FileText className="w-4 h-4 text-purple-600" />
-                  Google Form (Student Attendance Link)
+                  Google Form
                 </span>
                 <a
                   href={createdSession.formResponderUri}
@@ -217,7 +260,7 @@ export const CreateSessionModal: React.FC<CreateSessionModalProps> = ({
               <div className="flex items-center justify-between text-xs">
                 <span className="font-semibold text-slate-700 flex items-center gap-1.5">
                   <Table className="w-4 h-4 text-emerald-600" />
-                  Google Sheet (Official Attendance Register)
+                  Google Sheet
                 </span>
                 <a
                   href={createdSession.spreadsheetUrl}

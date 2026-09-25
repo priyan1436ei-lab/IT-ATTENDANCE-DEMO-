@@ -2,23 +2,14 @@
 import { getAccessToken, setAccessToken, googleSignIn, logoutUser, auth } from './firebaseAuth';
 import { AttendanceRecord, SheetRowData } from '../types/attendance';
 
-declare global {
-  interface Window {
-    google?: {
-      accounts: {
-        oauth2: {
-          initTokenClient: (config: {
-            client_id: string;
-            scope: string;
-            callback: (response: any) => void;
-            error_callback?: (err: any) => void;
-          }) => {
-            requestAccessToken: (options?: { prompt?: string }) => void;
-          };
-        };
-      };
-    };
-  }
+export interface SyncDiagnosis {
+  formId: string;
+  spreadsheetId: string;
+  totalFormResponses: number;
+  totalSheetRows: number;
+  newRowsAdded: number;
+  alreadyInSheetCount: number;
+  errors: string[];
 }
 
 class WorkspaceService {
@@ -31,14 +22,11 @@ class WorkspaceService {
   }
 
   public async login(): Promise<string> {
-    // 1. Primary auth method: Firebase Auth signInWithPopup (preserves standard Firebase session & handles popups robustly)
     try {
       const res = await googleSignIn();
       return res.accessToken;
     } catch (fbErr: any) {
-      console.warn('Firebase signInWithPopup failed or was closed, attempting Google Identity Services fallback:', fbErr);
-      
-      // If user closed the popup intentionally or blocked popup, provide clear error
+      console.warn('Firebase signInWithPopup failed or was closed, attempting fallback:', fbErr);
       if (fbErr?.code === 'auth/popup-closed-by-user') {
         throw new Error('Sign-in popup was closed. Please click Sign In again and complete the Google login dialog.');
       }
@@ -46,7 +34,7 @@ class WorkspaceService {
         throw new Error('Browser blocked the sign-in popup. Please allow popups for this site and try again.');
       }
 
-      // 2. Fallback to GIS client if available
+      // Fallback to GIS client if available
       return new Promise<string>((resolve, reject) => {
         if (typeof window !== 'undefined' && window.google?.accounts?.oauth2) {
           try {
@@ -109,6 +97,24 @@ class WorkspaceService {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Helper to extract Form ID or Spreadsheet ID from any user-pasted URL or raw ID
+   */
+  public extractIdFromUrl(input: string): string {
+    if (!input) return '';
+    const clean = input.trim();
+    // Google Forms URL: /forms/d/e/.../viewform or /forms/d/<formId>/edit
+    const formMatch = clean.match(/\/forms\/d\/(?:e\/)?([a-zA-Z0-9_-]+)/);
+    if (formMatch && formMatch[1]) return formMatch[1];
+
+    // Google Sheets URL: /spreadsheets/d/<sheetId>/
+    const sheetMatch = clean.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+    if (sheetMatch && sheetMatch[1]) return sheetMatch[1];
+
+    // Otherwise assume it's the raw ID
+    return clean;
   }
 
   /**
@@ -207,7 +213,7 @@ class WorkspaceService {
     const token = getAccessToken();
     if (!token) throw new Error('Not authenticated with Google. Please sign in first.');
 
-    // Create empty form
+    // Step 1: Create initial Form
     const initRes = await fetch('https://forms.googleapis.com/v1/forms', {
       method: 'POST',
       headers: {
@@ -230,7 +236,7 @@ class WorkspaceService {
     const formData = await initRes.json();
     const formId = formData.formId;
 
-    // Add attendance questions (Roll Number, Full Name, Status, Remarks)
+    // Step 2: Add attendance questions (Roll Number, Full Name, Status, Remarks)
     const updatePayload = {
       requests: [
         {
@@ -333,7 +339,7 @@ class WorkspaceService {
     });
 
     if (!updateRes.ok) {
-      console.warn('Could not populate questions on form directly:', await updateRes.text());
+      console.warn('Form batchUpdate warning:', await updateRes.text());
     }
 
     return {
@@ -350,13 +356,14 @@ class WorkspaceService {
     const token = getAccessToken();
     if (!token) throw new Error('Not authenticated');
 
-    const res = await fetch(`https://forms.googleapis.com/v1/forms/${formId}`, {
+    const cleanId = this.extractIdFromUrl(formId);
+    const res = await fetch(`https://forms.googleapis.com/v1/forms/${cleanId}`, {
       headers: { Authorization: `Bearer ${token}` }
     });
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error?.message || 'Failed to fetch Form details');
+      throw new Error(err.error?.message || `Failed to fetch Form details (ID: ${cleanId})`);
     }
 
     return await res.json();
@@ -369,13 +376,14 @@ class WorkspaceService {
     const token = getAccessToken();
     if (!token) throw new Error('Not authenticated');
 
-    const res = await fetch(`https://forms.googleapis.com/v1/forms/${formId}/responses`, {
+    const cleanId = this.extractIdFromUrl(formId);
+    const res = await fetch(`https://forms.googleapis.com/v1/forms/${cleanId}/responses`, {
       headers: { Authorization: `Bearer ${token}` }
     });
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error?.message || 'Failed to read form responses');
+      throw new Error(err.error?.message || `Failed to read Form responses (ID: ${cleanId})`);
     }
 
     const data = await res.json();
@@ -384,6 +392,7 @@ class WorkspaceService {
 
   /**
    * 5. Convert Raw Form Responses to Structured Attendance Records using Form question titles
+   * Robust against any Form structure (Tamil/English questions, varying formats)
    */
   public parseResponses(formDetails: any, responses: any[], sessionName: string): AttendanceRecord[] {
     const questionMap: { [questionId: string]: string } = {};
@@ -403,41 +412,85 @@ class WorkspaceService {
       let notes = '';
 
       if (r.answers) {
-        Object.entries(r.answers).forEach(([qId, ans]: [string, any]) => {
-          const title = questionMap[qId] || '';
-          const textVal = ans.textAnswers?.answers?.[0]?.value || '';
+        // Collect all answered text values
+        const answeredPairs: { title: string; val: string }[] = [];
 
-          if (title.includes('roll') || title.includes('register') || title.includes('reg') || title.includes('id')) {
-            rollNumber = textVal.trim().toUpperCase();
-          } else if (title.includes('name') || title.includes('student')) {
-            studentName = textVal.trim();
-          } else if (title.includes('status') || title.includes('attendance') || title.includes('present')) {
-            const rawStatus = textVal.toLowerCase();
-            if (rawStatus.includes('late')) status = 'Late';
-            else if (rawStatus.includes('absent')) status = 'Absent';
-            else if (rawStatus.includes('duty') || rawStatus.includes('excused') || rawStatus.includes('od')) status = 'Excused';
-            else status = 'Present';
-          } else if (title.includes('remark') || title.includes('reason') || title.includes('note')) {
-            notes = textVal.trim();
-          } else {
-            // Fallback heuristics:
-            if (!rollNumber && /^[0-9a-zA-Z]{5,15}$/.test(textVal)) {
-              rollNumber = textVal.toUpperCase();
-            } else if (!studentName && textVal.length > 2) {
-              studentName = textVal;
-            }
+        Object.entries(r.answers).forEach(([qId, ans]: [string, any]) => {
+          const title = (questionMap[qId] || '').toLowerCase();
+          const textVal = ans.textAnswers?.answers?.[0]?.value?.trim() || '';
+          if (textVal) {
+            answeredPairs.push({ title, val: textVal });
           }
         });
+
+        // 1. Identify by Question Title Keywords
+        for (const { title, val } of answeredPairs) {
+          if (
+            title.includes('roll') ||
+            title.includes('register') ||
+            title.includes('reg') ||
+            title.includes('id') ||
+            title.includes('எண்') ||
+            title.includes('பதிவு')
+          ) {
+            rollNumber = val.toUpperCase();
+          } else if (
+            title.includes('name') ||
+            title.includes('student') ||
+            title.includes('பெயர்')
+          ) {
+            studentName = val;
+          } else if (
+            title.includes('status') ||
+            title.includes('attendance') ||
+            title.includes('வருகை') ||
+            title.includes('present')
+          ) {
+            const rawStatus = val.toLowerCase();
+            if (rawStatus.includes('late') || rawStatus.includes('தாமதம்')) status = 'Late';
+            else if (rawStatus.includes('absent') || rawStatus.includes('இல்லை')) status = 'Absent';
+            else if (rawStatus.includes('duty') || rawStatus.includes('excused') || rawStatus.includes('od')) status = 'Excused';
+            else status = 'Present';
+          } else if (
+            title.includes('remark') ||
+            title.includes('reason') ||
+            title.includes('note') ||
+            title.includes('குறிப்பு')
+          ) {
+            notes = val;
+          }
+        }
+
+        // 2. Fallbacks if titles didn't match (generic forms)
+        for (const { val } of answeredPairs) {
+          if (!rollNumber && /^[0-9a-zA-Z_-]{4,15}$/.test(val) && !val.includes(' ')) {
+            rollNumber = val.toUpperCase();
+          } else if (!studentName && val.length >= 2 && !val.includes('@') && val !== rollNumber) {
+            // Check if looks like a name
+            const sLower = val.toLowerCase();
+            if (!['present', 'absent', 'late', 'od', 'excused'].includes(sLower)) {
+              studentName = val;
+            }
+          }
+        }
+      }
+
+      // If still missing name, check respondentEmail
+      if (!studentName && r.respondentEmail) {
+        studentName = r.respondentEmail.split('@')[0];
+      }
+      if (!studentName) {
+        studentName = 'Student ' + (rollNumber || r.responseId?.slice(-4) || '—');
       }
 
       return {
         responseId: r.responseId,
         timestamp: r.createTime || new Date().toISOString(),
-        studentName: studentName || r.respondentEmail || 'Unknown Student',
+        studentName: studentName || 'Unknown Student',
         rollNumber: rollNumber || 'N/A',
         email: r.respondentEmail || undefined,
         status,
-        sessionName,
+        sessionName: sessionName || 'General Session',
         notes,
         syncedToSheet: false
       };
@@ -445,19 +498,41 @@ class WorkspaceService {
   }
 
   /**
-   * 6. Read existing rows from Google Sheet to avoid duplicates
+   * 6. Read existing rows from Google Sheet
+   * Dynamically checks first sheet name if "Attendance Records" doesn't exist
    */
   public async getSheetRecords(spreadsheetId: string, sheetName: string = 'Attendance Records'): Promise<SheetRowData[]> {
     const token = getAccessToken();
     if (!token) throw new Error('Not authenticated');
 
-    const range = `${sheetName}!A2:G`;
-    const res = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}`,
+    const cleanId = this.extractIdFromUrl(spreadsheetId);
+
+    // Try reading target sheet name
+    let range = `${sheetName}!A2:G`;
+    let res = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(range)}`,
       {
         headers: { Authorization: `Bearer ${token}` }
       }
     );
+
+    // If target sheetName failed, inspect spreadsheet to find the real sheet tab title
+    if (!res.ok) {
+      const metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${cleanId}?fields=sheets.properties.title`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (metaRes.ok) {
+        const meta = await metaRes.json();
+        const firstSheet = meta.sheets?.[0]?.properties?.title || 'Sheet1';
+        range = `${firstSheet}!A2:G`;
+        res = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(range)}`,
+          {
+            headers: { Authorization: `Bearer ${token}` }
+          }
+        );
+      }
+    }
 
     if (!res.ok) {
       return [];
@@ -479,31 +554,77 @@ class WorkspaceService {
 
   /**
    * 7. Append Attendance records to Google Sheet
+   * Uses Response ID or (Roll Number + Timestamp) for precise deduplication
    */
   public async appendRecordsToSheet(
     spreadsheetId: string,
     records: AttendanceRecord[],
     sheetName: string = 'Attendance Records'
-  ): Promise<{ insertedCount: number }> {
+  ): Promise<{ insertedCount: number; alreadyExistingCount: number; totalProcessed: number }> {
     const token = getAccessToken();
     if (!token) throw new Error('Not authenticated');
-    if (!records.length) return { insertedCount: 0 };
+    if (!records.length) return { insertedCount: 0, alreadyExistingCount: 0, totalProcessed: 0 };
+
+    const cleanId = this.extractIdFromUrl(spreadsheetId);
 
     // Check existing records by reading the sheet
-    const existing = await this.getSheetRecords(spreadsheetId, sheetName);
-    const existingKeys = new Set(
-      existing.map((r) => `${r.rollNumber?.toLowerCase()}_${r.session?.toLowerCase()}`)
-    );
+    const existing = await this.getSheetRecords(cleanId, sheetName);
 
-    // Filter out duplicates (same roll number and session)
-    const newRecords = records.filter(
-      (r) => !existingKeys.has(`${r.rollNumber?.toLowerCase()}_${r.sessionName?.toLowerCase()}`)
-    );
+    // Build deduplication sets:
+    // 1. By Response ID (exact form submission id stored in column G)
+    // 2. By RollNumber + Session (only if roll number is valid, not N/A)
+    const existingResponseIds = new Set<string>();
+    const existingRollSession = new Set<string>();
 
-    if (newRecords.length === 0) {
-      return { insertedCount: 0 };
+    existing.forEach((r) => {
+      if (r.notes && r.notes.startsWith('resp_')) {
+        existingResponseIds.add(r.notes);
+      }
+      if (r.rollNumber && r.rollNumber !== 'N/A') {
+        existingRollSession.add(`${r.rollNumber.trim().toUpperCase()}_${r.session.trim().toLowerCase()}`);
+      }
+    });
+
+    // Also read raw range A:G to inspect Column G (response ID)
+    try {
+      const fullRangeRes = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(sheetName + '!G2:G')}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (fullRangeRes.ok) {
+        const gData = await fullRangeRes.json();
+        (gData.values || []).forEach((row: string[]) => {
+          if (row[0]) existingResponseIds.add(row[0].trim());
+        });
+      }
+    } catch {
+      // ignore
     }
 
+    const newRecords = records.filter((r) => {
+      // 1. If responseId already recorded
+      if (r.responseId && existingResponseIds.has(r.responseId.trim())) {
+        return false;
+      }
+      // 2. If valid roll number and already exists in this session
+      if (r.rollNumber && r.rollNumber !== 'N/A') {
+        const key = `${r.rollNumber.trim().toUpperCase()}_${(r.sessionName || '').trim().toLowerCase()}`;
+        if (existingRollSession.has(key)) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    if (newRecords.length === 0) {
+      return {
+        insertedCount: 0,
+        alreadyExistingCount: records.length,
+        totalProcessed: records.length
+      };
+    }
+
+    // Format new rows
     const rows = newRecords.map((r) => [
       new Date(r.timestamp).toLocaleString(),
       r.rollNumber,
@@ -514,27 +635,54 @@ class WorkspaceService {
       r.responseId || ''
     ]);
 
-    const range = `${sheetName}!A:G`;
-    const res = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          values: rows
-        })
+    // Ensure header row exists if sheet is empty
+    if (existing.length === 0) {
+      const checkHeaderRes = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(sheetName + '!A1:G1')}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const hData = await checkHeaderRes.json();
+      if (!hData.values || hData.values.length === 0) {
+        // Write header
+        await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(sheetName + '!A1:G1')}?valueInputOption=USER_ENTERED`,
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              values: [['Timestamp', 'Roll Number', 'Student Name', 'Status', 'Session / Class', 'Notes / Remarks', 'Form Response ID']]
+            })
+          }
+        );
       }
-    );
+    }
+
+    // Append rows
+    const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/${encodeURIComponent(sheetName + '!A:G')}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+    const res = await fetch(appendUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        values: rows
+      })
+    });
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error?.message || 'Failed to sync to Google Sheet');
+      throw new Error(err.error?.message || 'Failed to append rows to Google Sheet');
     }
 
-    return { insertedCount: newRecords.length };
+    return {
+      insertedCount: newRecords.length,
+      alreadyExistingCount: records.length - newRecords.length,
+      totalProcessed: records.length
+    };
   }
 
   /**
@@ -561,6 +709,7 @@ class WorkspaceService {
   ): Promise<void> {
     const token = getAccessToken();
     if (!token) return;
+    const cleanId = this.extractIdFromUrl(spreadsheetId);
     const total = presentCount + absentCount + lateCount;
     const percentage = total > 0 ? `${Math.round(((presentCount + lateCount) / total) * 100)}%` : '0%';
 
@@ -568,7 +717,7 @@ class WorkspaceService {
 
     try {
       await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Daily%20Summary!A:F:append?valueInputOption=USER_ENTERED`,
+        `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}/values/Daily%20Summary!A:F:append?valueInputOption=USER_ENTERED`,
         {
           method: 'POST',
           headers: {
@@ -581,8 +730,44 @@ class WorkspaceService {
         }
       );
     } catch (e) {
-      console.error('Failed to update daily summary:', e);
+      console.warn('Failed to update daily summary:', e);
     }
+  }
+
+  /**
+   * Diagnose Form and Sheet Connection
+   */
+  public async diagnoseSync(formId: string, spreadsheetId: string): Promise<SyncDiagnosis> {
+    const cleanFormId = this.extractIdFromUrl(formId);
+    const cleanSheetId = this.extractIdFromUrl(spreadsheetId);
+    const errors: string[] = [];
+
+    let totalFormResponses = 0;
+    let totalSheetRows = 0;
+
+    try {
+      const responses = await this.getFormResponses(cleanFormId);
+      totalFormResponses = responses.length;
+    } catch (e: any) {
+      errors.push(`Form error: ${e.message}`);
+    }
+
+    try {
+      const sheetRows = await this.getSheetRecords(cleanSheetId);
+      totalSheetRows = sheetRows.length;
+    } catch (e: any) {
+      errors.push(`Sheet error: ${e.message}`);
+    }
+
+    return {
+      formId: cleanFormId,
+      spreadsheetId: cleanSheetId,
+      totalFormResponses,
+      totalSheetRows,
+      newRowsAdded: 0,
+      alreadyInSheetCount: 0,
+      errors
+    };
   }
 }
 

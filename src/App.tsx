@@ -1,17 +1,23 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AuthBar } from './components/AuthBar';
+import { RoleLoginPage } from './components/RoleLoginPage';
+import { StudentPortalView } from './components/StudentPortalView';
 import { CreateSessionModal } from './components/CreateSessionModal';
 import { AttendanceSyncCard } from './components/AttendanceSyncCard';
 import { SheetTableView } from './components/SheetTableView';
 import { QuickMarkModal } from './components/QuickMarkModal';
 import { RosterManager } from './components/RosterManager';
 import { workspaceService } from './services/workspace';
-import { initAuth, auth } from './services/firebaseAuth';
+import { initAuth } from './services/firebaseAuth';
 import { storage } from './services/storage';
-import { AttendanceSession, AttendanceRecord, SheetRowData, StudentProfile } from './types/attendance';
-import { Plus, Sparkles, FileText, Table, CheckCircle2, AlertCircle, ArrowRight, BookOpen, Clock, Activity, ExternalLink, ShieldCheck } from 'lucide-react';
+import { AttendanceSession, AttendanceRecord, SheetRowData, StudentProfile, AppUserSession } from './types/attendance';
+import { Plus, Sparkles, FileText, Table, CheckCircle2, AlertCircle, BookOpen, Link2, Shield, GraduationCap, LogOut, User } from 'lucide-react';
 
 export default function App() {
+  // App Role Authentication (Student or Admin)
+  const [currentAppUser, setCurrentAppUser] = useState<AppUserSession | null>(() => storage.getCurrentUser());
+
+  // Google Workspace OAuth State
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(workspaceService.isAuthenticated());
   const [userInfo, setUserInfo] = useState<{ name: string; email: string; picture?: string } | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(false);
@@ -34,6 +40,13 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [autoSyncActive, setAutoSyncActive] = useState(false);
   const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
+  const [syncDetails, setSyncDetails] = useState<{
+    time: string;
+    formResponseCount: number;
+    newRowsAdded: number;
+    alreadyExisting: number;
+  } | null>(null);
+
   const [roster, setRoster] = useState<StudentProfile[]>(() => storage.getRoster());
 
   // Auto-sync timer ref
@@ -42,7 +55,7 @@ export default function App() {
   // Initialize Firebase Auth listener on app load
   useEffect(() => {
     const unsubscribe = initAuth(
-      (user, token) => {
+      (user) => {
         setIsAuthenticated(true);
         setUserInfo({
           name: user.displayName || 'Authorized User',
@@ -66,13 +79,17 @@ export default function App() {
     }
   }, [activeSession, isAuthenticated]);
 
-  // Handle auto-sync interval
+  // Handle auto-sync interval (for admin only)
   useEffect(() => {
-    if (autoSyncActive && activeSession?.formId && activeSession?.spreadsheetId && isAuthenticated) {
-      // Run once immediately
+    if (
+      currentAppUser?.role === 'admin' &&
+      autoSyncActive &&
+      activeSession?.formId &&
+      activeSession?.spreadsheetId &&
+      isAuthenticated
+    ) {
       runSyncWorkflow(activeSession);
 
-      // Interval 15 seconds
       autoSyncIntervalRef.current = setInterval(() => {
         runSyncWorkflow(activeSession);
       }, 15000);
@@ -88,9 +105,19 @@ export default function App() {
         clearInterval(autoSyncIntervalRef.current);
       }
     };
-  }, [autoSyncActive, activeSession, isAuthenticated]);
+  }, [autoSyncActive, activeSession, isAuthenticated, currentAppUser]);
 
-  const handleLogin = async () => {
+  const handleRoleLogin = (user: AppUserSession) => {
+    setCurrentAppUser(user);
+  };
+
+  const handleRoleLogout = () => {
+    storage.setCurrentUser(null);
+    setCurrentAppUser(null);
+    setAutoSyncActive(false);
+  };
+
+  const handleGoogleLogin = async () => {
     setIsAuthLoading(true);
     setAuthErrorMessage(null);
     try {
@@ -101,14 +128,13 @@ export default function App() {
     } catch (err: any) {
       console.warn('Sign in interaction cancelled or failed:', err);
       const msg = err?.message || 'Login was not completed. Please try again.';
-      // User-friendly inline notification instead of harsh alert()
       setAuthErrorMessage(msg);
     } finally {
       setIsAuthLoading(false);
     }
   };
 
-  const handleLogout = async () => {
+  const handleGoogleLogout = async () => {
     await workspaceService.logout();
     setIsAuthenticated(false);
     setUserInfo(null);
@@ -152,9 +178,18 @@ export default function App() {
       // Reload fresh rows from sheet
       await loadSheetRecords(session.spreadsheetId);
 
-      const msg = result.insertedCount > 0
-        ? `Synced ${result.insertedCount} new student submission(s) into Google Sheet!`
-        : `All submissions up to date (${rawResponses.length} total Form responses).`;
+      const timeNow = new Date().toLocaleTimeString();
+      setSyncDetails({
+        time: timeNow,
+        formResponseCount: rawResponses.length,
+        newRowsAdded: result.insertedCount,
+        alreadyExisting: result.alreadyExistingCount
+      });
+
+      const msg =
+        result.insertedCount > 0
+          ? `✓ Google Sheet Updated! Added ${result.insertedCount} new student submission(s).`
+          : `✓ Sync complete: Form has ${rawResponses.length} response(s), all up to date in Google Sheet.`;
       setSyncStatusMsg(msg);
 
       // Update session timestamp
@@ -162,11 +197,11 @@ export default function App() {
       storage.updateSession(updated);
       setActiveSession(updated);
 
-      setTimeout(() => setSyncStatusMsg(null), 4000);
+      setTimeout(() => setSyncStatusMsg(null), 5000);
     } catch (err: any) {
       console.error('Sync failed:', err);
-      setSyncStatusMsg(`Sync notice: ${err.message || 'Error communicating with Google'}`);
-      setTimeout(() => setSyncStatusMsg(null), 5000);
+      setSyncStatusMsg(`Sync notice: ${err.message || 'Error communicating with Google Forms/Sheets'}`);
+      setTimeout(() => setSyncStatusMsg(null), 6000);
     } finally {
       setIsSyncing(false);
     }
@@ -207,107 +242,147 @@ export default function App() {
     storage.saveRoster(newRoster);
   };
 
+  // 1. If not logged in as Student or Admin, show RoleLoginPage
+  if (!currentAppUser) {
+    return <RoleLoginPage onLoginSuccess={handleRoleLogin} />;
+  }
+
+  const isAdmin = currentAppUser.role === 'admin';
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col text-slate-800">
-      {/* Top Google Workspace Auth Bar */}
-      <AuthBar
-        isAuthenticated={isAuthenticated}
-        userInfo={userInfo}
-        onLogin={handleLogin}
-        onLogout={handleLogout}
-        isLoading={isAuthLoading}
-      />
+      {/* Top Application Bar */}
+      <header className="bg-white border-b border-slate-200 px-4 py-3 sm:px-6">
+        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div
+              className={`w-10 h-10 rounded-xl flex items-center justify-center text-white shadow-sm font-bold text-lg ${
+                isAdmin
+                  ? 'bg-gradient-to-tr from-slate-900 to-slate-700'
+                  : 'bg-gradient-to-tr from-emerald-600 to-teal-500'
+              }`}
+            >
+              {isAdmin ? <Shield className="w-5 h-5 text-amber-300" /> : <GraduationCap className="w-5 h-5" />}
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-base sm:text-lg font-bold text-slate-900 tracking-tight">
+                  Class Attendance Sync
+                </h1>
+                <span
+                  className={`text-xs px-2 py-0.5 rounded-full font-bold border ${
+                    isAdmin
+                      ? 'bg-purple-50 text-purple-700 border-purple-200'
+                      : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                  }`}
+                >
+                  {isAdmin ? '🛡️ Admin Portal' : '🎓 Student Portal'}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500">
+                {isAdmin
+                  ? 'Google Forms & Google Sheets Attendance Management'
+                  : `Signed in: ${currentAppUser.name} (${currentAppUser.identifier})`}
+              </p>
+            </div>
+          </div>
+
+          {/* User Controls & Logout */}
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-full text-xs">
+              <User className="w-3.5 h-3.5 text-slate-500" />
+              <span className="font-semibold text-slate-700 max-w-[130px] truncate">
+                {currentAppUser.name}
+              </span>
+            </div>
+
+            <button
+              onClick={handleRoleLogout}
+              className="inline-flex items-center gap-1.5 text-xs text-slate-600 hover:text-rose-600 px-3 py-1.5 rounded-lg border border-slate-200 hover:border-rose-200 hover:bg-rose-50 transition cursor-pointer font-medium"
+              title="Logout from portal"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Logout</span>
+            </button>
+          </div>
+        </div>
+      </header>
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
-        {/* Auth Error Banner if popup was closed or cancelled */}
-        {authErrorMessage && !isAuthenticated && (
-          <div className="p-4 bg-amber-50 border border-amber-200 text-amber-900 rounded-2xl text-xs flex items-center justify-between shadow-xs">
-            <div className="flex items-center gap-2.5">
-              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-              <span>
-                <strong>Sign-in notice:</strong> {authErrorMessage} Click{' '}
-                <button
-                  onClick={handleLogin}
-                  className="underline font-semibold text-amber-900 hover:text-black cursor-pointer"
-                >
-                  here to retry
-                </button>
-                .
-              </span>
-            </div>
-            <button
-              onClick={() => setAuthErrorMessage(null)}
-              className="text-amber-600 hover:text-amber-800 p-1 font-bold text-sm cursor-pointer"
-            >
-              ✕
-            </button>
-          </div>
-        )}
-
-        {/* Sync notification toast */}
-        {syncStatusMsg && (
-          <div className="p-3 bg-emerald-900 text-emerald-100 rounded-xl text-xs flex items-center justify-between shadow-lg animate-in slide-in-from-top duration-300">
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-              <span className="font-medium">{syncStatusMsg}</span>
-            </div>
-            <button onClick={() => setSyncStatusMsg(null)} className="text-emerald-300 hover:text-white cursor-pointer">
-              ✕
-            </button>
-          </div>
-        )}
-
-        {!isAuthenticated ? (
-          /* Unauthenticated Landing / Call To Action */
-          <div className="bg-white rounded-3xl border border-slate-200/80 shadow-xs p-8 sm:p-12 text-center max-w-2xl mx-auto my-12">
-            <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center text-white mx-auto shadow-md mb-6">
-              <Sparkles className="w-8 h-8" />
-            </div>
-            <h2 className="text-2xl font-extrabold text-slate-900 tracking-tight mb-2">
-              Class Attendance: Google Form ➔ Google Sheet Sync
-            </h2>
-            <p className="text-sm text-slate-600 mb-6 leading-relaxed">
-              When students submit attendance on Google Form, it automatically populates your official Google Sheets attendance register in real time.
-            </p>
-
-            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 mb-6 text-left space-y-2 text-xs text-slate-600">
-              <div className="flex items-center gap-2 font-semibold text-slate-800">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>Instant Google Form generation with Roll Number, Name & Status questions</span>
-              </div>
-              <div className="flex items-center gap-2 font-semibold text-slate-800">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>Structured Google Sheet with formatted columns, frozen headers & duplicate protection</span>
-              </div>
-              <div className="flex items-center gap-2 font-semibold text-slate-800">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>Live background auto-sync every 15s or on-demand instant sync</span>
-              </div>
-              <div className="flex items-center gap-2 font-semibold text-slate-800">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>Classroom QR code projector for students to scan and mark attendance</span>
-              </div>
-            </div>
-
-            <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
-              <button
-                onClick={handleLogin}
-                disabled={isAuthLoading}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm px-6 py-3 rounded-xl shadow-md transition hover:shadow-lg cursor-pointer disabled:opacity-50"
-              >
-                <Sparkles className="w-4 h-4" />
-                <span>{isAuthLoading ? 'Opening Google Sign-In...' : 'Connect Google Workspace & Get Started'}</span>
-              </button>
-            </div>
-            <p className="text-[11px] text-slate-400 mt-3">
-              Uses official Google Workspace OAuth to create and sync your Google Forms & Google Sheets.
-            </p>
-          </div>
+        {/* STUDENT PORTAL VIEW */}
+        {!isAdmin ? (
+          <StudentPortalView
+            currentUser={currentAppUser}
+            activeSession={activeSession}
+            sheetRecords={sheetRecords}
+            onOpenForm={() => {
+              if (activeSession?.formResponderUri) {
+                window.open(activeSession.formResponderUri, '_blank');
+              }
+            }}
+          />
         ) : (
-          /* Authenticated Dashboard */
+          /* ADMIN PORTAL VIEW */
           <>
-            {/* Session Switcher & Create Session Header */}
+            {/* Google Workspace Connection Banner for Admin */}
+            {!isAuthenticated ? (
+              <div className="bg-amber-50 border border-amber-200 p-5 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-amber-100 text-amber-800 rounded-xl">
+                    <AlertCircle className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-amber-900">
+                      Google Workspace Connection Required (Admin)
+                    </h3>
+                    <p className="text-xs text-amber-700 mt-0.5">
+                      Connect your Google Account to authorize reading Form responses and updating your Google Sheet.
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleGoogleLogin}
+                  disabled={isAuthLoading}
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs px-5 py-2.5 rounded-xl shadow-xs transition cursor-pointer disabled:opacity-50"
+                >
+                  <Sparkles className="w-4 h-4 text-emerald-400" />
+                  <span>{isAuthLoading ? 'Connecting...' : 'Connect Google Workspace'}</span>
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between p-3 bg-emerald-50/70 border border-emerald-200 rounded-xl text-xs text-emerald-800">
+                <div className="flex items-center gap-2 font-medium">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  <span>Google Workspace Connected: {userInfo?.email || 'Authorized'}</span>
+                </div>
+                <button
+                  onClick={handleGoogleLogout}
+                  className="text-xs text-slate-500 hover:text-rose-600 underline cursor-pointer"
+                >
+                  Disconnect Google
+                </button>
+              </div>
+            )}
+
+            {/* Sync Notification Toast */}
+            {syncStatusMsg && (
+              <div className="p-3 bg-emerald-900 text-emerald-100 rounded-xl text-xs flex items-center justify-between shadow-lg animate-in slide-in-from-top duration-300">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span className="font-medium">{syncStatusMsg}</span>
+                </div>
+                <button
+                  onClick={() => setSyncStatusMsg(null)}
+                  className="text-emerald-300 hover:text-white cursor-pointer ml-3"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            {/* Session Switcher & Link Form Header */}
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-2">
                 <label className="text-xs font-semibold text-slate-500">Active Class:</label>
@@ -330,7 +405,7 @@ export default function App() {
                     ))}
                   </select>
                 ) : (
-                  <span className="text-xs text-slate-400 italic">No class created yet</span>
+                  <span className="text-xs text-slate-400 italic">No class connected yet</span>
                 )}
               </div>
 
@@ -338,8 +413,8 @@ export default function App() {
                 onClick={() => setIsCreateOpen(true)}
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white shadow-xs transition cursor-pointer"
               >
-                <Plus className="w-4 h-4 text-emerald-400" />
-                <span>Create New Class Attendance</span>
+                <Link2 className="w-4 h-4 text-emerald-400" />
+                <span>Link Google Form & Sheet</span>
               </button>
             </div>
 
@@ -355,6 +430,7 @@ export default function App() {
                   onToggleAutoSync={() => setAutoSyncActive(!autoSyncActive)}
                   onManualSync={() => runSyncWorkflow(activeSession)}
                   onOpenQuickMark={() => setIsQuickMarkOpen(true)}
+                  lastSyncDetails={syncDetails}
                 />
 
                 {/* Tab Navigation */}
@@ -380,7 +456,7 @@ export default function App() {
                     }`}
                   >
                     <BookOpen className="w-4 h-4" />
-                    <span>Class Roster ({roster.length} Students)</span>
+                    <span>Student Roster ({roster.length} Students)</span>
                   </button>
 
                   <button
@@ -392,7 +468,7 @@ export default function App() {
                     }`}
                   >
                     <Sparkles className="w-4 h-4 text-amber-500" />
-                    <span>How Sync Works (Tamil & English Guide)</span>
+                    <span>How Sync Works</span>
                   </button>
                 </div>
 
@@ -407,17 +483,17 @@ export default function App() {
                 )}
 
                 {activeTab === 'roster' && (
-                  <RosterManager roster={roster} onUpdateRoster={handleUpdateRoster} />
+                  <RosterManager roster={roster} onUpdateRoster={handleUpdateRoster} isAdmin={isAdmin} />
                 )}
 
                 {activeTab === 'guide' && (
                   <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-6">
                     <div>
                       <h3 className="text-base font-bold text-slate-900 mb-2">
-                        How Google Form ➔ Google Sheet Attendance Sync Works:
+                        How Google Form ➔ Google Sheet Sync Works:
                       </h3>
                       <p className="text-xs text-slate-600 leading-relaxed mb-4">
-                        (Google Form-la attendance potta, Google Sheet-la automatic-ah update aaga intha app help pannuthu)
+                        Automatic workflow to synchronize student attendance from your Google Form into your Google Sheets register.
                       </p>
 
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
@@ -425,9 +501,9 @@ export default function App() {
                           <div className="w-7 h-7 rounded-lg bg-purple-100 text-purple-700 font-bold flex items-center justify-center">
                             1
                           </div>
-                          <h4 className="font-bold text-slate-800">1. Share Form or QR Code</h4>
+                          <h4 className="font-bold text-slate-800">1. Share Form or Classroom QR</h4>
                           <p className="text-slate-600">
-                            Click <span className="font-semibold text-purple-700">"Share Form"</span> or open <span className="font-semibold text-slate-800">"Classroom QR"</span> to display on classroom projector or WhatsApp group. Students fill Roll No, Name, and Status.
+                            Provide the <span className="font-semibold text-purple-700">"Student Form Link"</span> or project the <span className="font-semibold text-slate-800">"Classroom QR"</span> code so students can submit attendance.
                           </p>
                         </div>
 
@@ -437,7 +513,7 @@ export default function App() {
                           </div>
                           <h4 className="font-bold text-slate-800">2. Real-Time Auto-Sync</h4>
                           <p className="text-slate-600">
-                            Switch ON <span className="font-semibold text-emerald-700">"Live Auto-Sync"</span>. The app reads submissions every 15 seconds from Google Forms API and appends new rows into the linked Google Sheet.
+                            Enable <span className="font-semibold text-emerald-700">"Live Auto-Sync"</span> to automatically fetch new responses via Google Forms API every 15 seconds and append them to your spreadsheet.
                           </p>
                         </div>
 
@@ -445,9 +521,9 @@ export default function App() {
                           <div className="w-7 h-7 rounded-lg bg-blue-100 text-blue-700 font-bold flex items-center justify-center">
                             3
                           </div>
-                          <h4 className="font-bold text-slate-800">3. Google Sheet Register & Summary</h4>
+                          <h4 className="font-bold text-slate-800">3. Direct Google Sheet Update</h4>
                           <p className="text-slate-600">
-                            Your Google Sheet contains <span className="font-semibold">"Attendance Records"</span> and <span className="font-semibold">"Daily Summary"</span> with percentage calculations and duplicate protection.
+                            Click <span className="font-semibold text-emerald-700">"Open Google Sheet"</span> at any time to inspect your live spreadsheet in Google Drive.
                           </p>
                         </div>
                       </div>
@@ -456,18 +532,18 @@ export default function App() {
                     <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-200 text-xs text-emerald-900 space-y-1">
                       <p className="font-bold">✨ Direct Links for this Class:</p>
                       <p>
-                        • Form Edit URL:{' '}
+                        • Form Link:{' '}
                         <a
-                          href={activeSession.formEditUri}
+                          href={activeSession.formResponderUri}
                           target="_blank"
                           rel="noreferrer"
                           className="underline font-mono"
                         >
-                          {activeSession.formEditUri}
+                          {activeSession.formResponderUri}
                         </a>
                       </p>
                       <p>
-                        • Google Sheet URL:{' '}
+                        • Google Sheet Link:{' '}
                         <a
                           href={activeSession.spreadsheetUrl}
                           target="_blank"
@@ -486,14 +562,14 @@ export default function App() {
                 <FileText className="w-12 h-12 text-slate-400 mx-auto mb-3" />
                 <h3 className="text-sm font-bold text-slate-700 mb-1">No Attendance Session Selected</h3>
                 <p className="text-xs text-slate-500 mb-4 max-w-sm mx-auto">
-                  Click the button below to generate a new Google Form and Google Sheet register for today's class.
+                  Provide your Google Form and Google Sheet URLs to link a class session.
                 </p>
                 <button
                   onClick={() => setIsCreateOpen(true)}
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition cursor-pointer"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>Create Class Attendance Session</span>
+                  <span>Link Google Form & Google Sheet</span>
                 </button>
               </div>
             )}
