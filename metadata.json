@@ -1,0 +1,8 @@
+{
+  "name": "Class Attendance Form & Sheet Sync",
+  "description": "Automatically sync class attendance submitted via Google Forms directly into Google Sheets with real-time tracking, analytics, and instant form generation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
